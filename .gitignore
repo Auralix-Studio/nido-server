@@ -1,0 +1,8 @@
+/nido
+/aura-home
+*.exe
+dist/
+certs/
+data/
+config.yaml
+secrets.yaml

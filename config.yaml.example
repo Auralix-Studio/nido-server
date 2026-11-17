@@ -1,0 +1,38 @@
+# Nido — configuración. Todo es opcional: lo que falte usa el valor por defecto.
+# Las contraseñas no van aquí:
+#   nido --set-pin               PIN de la app
+#   nido --set-router-password   contraseña del panel del router
+
+server:
+  host: 0.0.0.0
+  port: 8443
+  allow_power: true          # permitir reiniciar/apagar el servidor desde la app
+
+# Leer quién está conectado directamente del panel web del router.
+# Sin esto se usa un escaneo ARP de la red (más lento y menos exacto).
+router:
+  type: ""                   # "zte" para routers ZTE (F6600P y similares)
+  url: ""                    # vacío = http://<puerta de enlace>
+  username: admin
+
+services:
+  # Servicios systemd fijados (también se pueden fijar desde la app).
+  # Si uno fijado se cae, se genera una alerta.
+  watch: []
+  #  - nginx.service
+  #  - {unit: postgresql.service, name: "Base de datos"}
+  show_all_running: true     # listar además todos los servicios en ejecución
+  docker: true               # incluir contenedores Docker
+  allow_actions: true        # permitir iniciar/detener/reiniciar desde la app
+
+network:
+  interface: ""              # vacío = autodetectar
+  subnet: ""                 # vacío = autodetectar (ej. 192.168.1.0/24)
+  scan_interval_seconds: 60  # cada cuánto se consulta el router / se escanea
+  offline_after_seconds: 300 # sin verse este tiempo = desconectado
+
+alerts:
+  # Push al móvil con la app ntfy: usa un tema difícil de adivinar.
+  ntfy_url: ""               # ej. https://ntfy.sh/nido-casa-8f3k2
+  new_device: true
+  service_down: true

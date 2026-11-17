@@ -1,0 +1,14 @@
+[Unit]
+Description=Nido server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/nido
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
