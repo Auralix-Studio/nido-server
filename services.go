@@ -318,30 +318,31 @@ func (m *ServiceManager) dockerServices() []Service {
 		return nil
 	}
 	statsOut, _ := run(15*time.Second, "docker", "stats", "--no-stream", "--format", "{{json .}}")
-	stats := map[string]map[string]string{}
+	type dockerStats struct{ Name, MemUsage, CPUPerc string }
+	stats := map[string]dockerStats{}
 	for _, line := range strings.Split(statsOut, "\n") {
-		var s map[string]string
-		if json.Unmarshal([]byte(line), &s) == nil {
-			stats[s["Name"]] = s
+		var s dockerStats
+		if json.Unmarshal([]byte(line), &s) == nil && s.Name != "" {
+			stats[s.Name] = s
 		}
 	}
 
 	services := []Service{}
 	for _, line := range strings.Split(ps, "\n") {
-		var c map[string]string
-		if json.Unmarshal([]byte(line), &c) != nil {
+		var c struct{ Names, Image, State, Status, Ports string }
+		if json.Unmarshal([]byte(line), &c) != nil || c.Names == "" {
 			continue
 		}
-		name := c["Names"]
-		running := c["State"] == "running"
+		name := c.Names
+		running := c.State == "running"
 		s := Service{
-			ID: "docker:" + name, Kind: "docker", Name: name, Unit: c["Image"],
-			Description: c["Status"], Watched: true, State: c["State"], SubState: c["Status"],
-			Running: running, Enabled: true, Ports: dockerPorts(c["Ports"]),
+			ID: "docker:" + name, Kind: "docker", Name: name, Unit: c.Image,
+			Description: c.Status, Watched: true, State: c.State, SubState: c.Status,
+			Running: running, Enabled: true, Ports: dockerPorts(c.Ports),
 		}
 		if st, ok := stats[name]; ok && running {
-			s.MemoryBytes = parseSize(strings.Split(st["MemUsage"], "/")[0])
-			if pct, err := strconv.ParseFloat(strings.TrimSuffix(st["CPUPerc"], "%"), 64); err == nil {
+			s.MemoryBytes = parseSize(strings.Split(st.MemUsage, "/")[0])
+			if pct, err := strconv.ParseFloat(strings.TrimSuffix(st.CPUPerc, "%"), 64); err == nil {
 				s.CPUPercent = &pct
 			}
 		}

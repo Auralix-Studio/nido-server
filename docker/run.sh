@@ -12,6 +12,8 @@ docker run -d --name nido --restart unless-stopped \
   --network=host \
   -v "$(pwd)/data:/etc/nido" \
   -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /:/host/root:ro \
+  -v /home:/host/home:ro \
   nido-server
 
 echo "Arrancado. Logs: docker logs -f nido"

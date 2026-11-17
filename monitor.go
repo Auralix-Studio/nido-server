@@ -73,7 +73,34 @@ func netRates() M {
 	return result
 }
 
+func hostDisks() []M {
+	mounts := []struct{ path, label string }{
+		{"/host/root", "/"},
+		{"/host/home", "/home"},
+	}
+	var list []M
+	seen := map[uint64]bool{}
+	for _, m := range mounts {
+		if _, err := os.Stat(m.path); err != nil {
+			continue
+		}
+		usage, err := disk.Usage(m.path)
+		if err != nil || usage.Total == 0 || seen[usage.Total] {
+			continue
+		}
+		seen[usage.Total] = true
+		list = append(list, M{
+			"mount": m.label, "device": m.label, "fstype": usage.Fstype,
+			"total": usage.Total, "used": usage.Used, "percent": round1(usage.UsedPercent),
+		})
+	}
+	return list
+}
+
 func disks() []M {
+	if list := hostDisks(); len(list) > 0 {
+		return list
+	}
 	list := []M{}
 	seen := map[string]bool{}
 	partitions, _ := disk.Partitions(false)
@@ -98,12 +125,32 @@ func disks() []M {
 	return list
 }
 
+func hostOS() string {
+	raw, err := os.ReadFile("/host/root/etc/os-release")
+	if err != nil {
+		return ""
+	}
+	vals := map[string]string{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+			vals[k] = strings.Trim(v, `"`)
+		}
+	}
+	if vals["ID"] != "" && vals["VERSION_ID"] != "" {
+		return vals["ID"] + " " + vals["VERSION_ID"]
+	}
+	return vals["PRETTY_NAME"]
+}
+
 func serverStatus() M {
 	status := M{"hostname": "", "os": "", "uptime_seconds": 0}
 	if info, err := host.Info(); err == nil {
 		status["hostname"] = info.Hostname
 		status["os"] = strings.TrimSpace(info.Platform + " " + info.PlatformVersion)
 		status["uptime_seconds"] = info.Uptime
+	}
+	if osName := hostOS(); osName != "" {
+		status["os"] = osName
 	}
 
 	cpuInfo := M{"percent": 0.0, "cores": 0, "load_avg": nil, "temperature": temperature()}
