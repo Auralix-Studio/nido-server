@@ -86,7 +86,7 @@ func resolveConfigPath() string {
 			return env
 		}
 	}
-	for _, etc := range []string{"/etc/nido/config.yaml", "/etc/aura-home/config.yaml"} {
+	for _, etc := range []string{"/etc/nido/config.yaml", "/etc/aura-home/config.yaml", "config.yaml"} {
 		if _, err := os.Stat(etc); err == nil {
 			return etc
 		}
@@ -126,6 +126,7 @@ func loadConfig() {
 	cfg.Services.CheckIntervalSeconds = 30
 	cfg.Network.ScanIntervalSeconds = 60
 	cfg.Network.OfflineAfterSeconds = 300
+	cfg.Router.Type = "zte"
 	cfg.Router.Username = "admin"
 	cfg.Alerts.NewDevice = true
 	cfg.Alerts.ServiceDown = true

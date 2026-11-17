@@ -11,7 +11,7 @@ server:
 # Leer quién está conectado directamente del panel web del router.
 # Sin esto se usa un escaneo ARP de la red (más lento y menos exacto).
 router:
-  type: ""                   # "zte" para routers ZTE (F6600P y similares)
+  type: "zte"                # "zte" para routers ZTE (F6600P y similares), "" para desactivar
   url: ""                    # vacío = http://<puerta de enlace>
   username: admin
 

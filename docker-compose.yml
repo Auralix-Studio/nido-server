@@ -1,0 +1,26 @@
+name: nido
+
+services:
+  nido:
+    build: .
+    image: nido-server:latest
+    container_name: nido
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./data:/etc/nido
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /:/host/root:ro
+      - /home:/host/home:ro
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    container_name: nido-tunnel
+    restart: unless-stopped
+    network_mode: host
+    user: "${TUNNEL_UID:-1000}:${TUNNEL_GID:-1000}"
+    command: tunnel --no-autoupdate --config /etc/cloudflared/nido-config.yml run nido
+    volumes:
+      - ${HOME}/.cloudflared:/etc/cloudflared:ro
+    depends_on:
+      - nido
