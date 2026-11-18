@@ -58,6 +58,11 @@ type Config struct {
 		URL      string `yaml:"url"`
 		Username string `yaml:"username"`
 	} `yaml:"router"`
+	TV struct {
+		// Vacío = detectar la TV LG en la red por su nombre
+		Host string `yaml:"host"`
+		MAC  string `yaml:"mac"`
+	} `yaml:"tv"`
 	Alerts struct {
 		NtfyURL     string `yaml:"ntfy_url"`
 		NewDevice   bool   `yaml:"new_device"`
@@ -72,6 +77,7 @@ type Secrets struct {
 	PinHash        string `yaml:"pin_hash,omitempty"`
 	JWTSecret      string `yaml:"jwt_secret,omitempty"`
 	RouterPassword string `yaml:"router_password,omitempty"`
+	TVClientKey    string `yaml:"tv_client_key,omitempty"`
 }
 
 var (

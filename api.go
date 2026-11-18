@@ -14,6 +14,7 @@ import (
 )
 
 type App struct {
+	tv       *TVManager
 	store    *Store
 	services *ServiceManager
 	scanner  *NetworkScanner
@@ -207,6 +208,38 @@ func (a *App) routes() http.Handler {
 	}))
 	mux.HandleFunc("DELETE /network/devices/{mac}", auth(func(w http.ResponseWriter, r *http.Request) {
 		a.store.deleteDevice(strings.ToLower(r.PathValue("mac")))
+		writeJSON(w, 200, ok)
+	}))
+
+	// TV
+	mux.HandleFunc("GET /tv/status", auth(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, a.tv.status())
+	}))
+	mux.HandleFunc("POST /tv/pair", auth(func(w http.ResponseWriter, r *http.Request) {
+		if err := a.tv.pair(); err != nil {
+			fail(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		a.notify("tv", "TV emparejada con Nido", "", false)
+		writeJSON(w, 200, ok)
+	}))
+	mux.HandleFunc("GET /tv/apps", auth(func(w http.ResponseWriter, r *http.Request) {
+		apps, err := a.tv.apps()
+		if err != nil {
+			fail(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		writeJSON(w, 200, M{"apps": apps})
+	}))
+	mux.HandleFunc("POST /tv/command", auth(func(w http.ResponseWriter, r *http.Request) {
+		var body struct{ Action, Value string }
+		if !readBody(w, r, &body) {
+			return
+		}
+		if err := a.tv.command(body.Action, body.Value); err != nil {
+			fail(w, http.StatusBadGateway, err.Error())
+			return
+		}
 		writeJSON(w, 200, ok)
 	}))
 

@@ -36,3 +36,8 @@ alerts:
   ntfy_url: ""               # ej. https://ntfy.sh/nido-casa-8f3k2
   new_device: true
   service_down: true
+
+# TV LG webOS para la pestaña "tv". Vacío = se detecta en la red por su nombre.
+tv:
+  host: ""                   # ej. 192.168.1.5
+  mac: ""                    # para encenderla (Wake-on-LAN)

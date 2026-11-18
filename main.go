@@ -295,7 +295,7 @@ func main() {
 	}
 
 	store := openStore(resolvePath(cfg.Storage.Path))
-	app := &App{store: store, services: newServiceManager(store), scanNow: make(chan struct{}, 1)}
+	app := &App{store: store, services: newServiceManager(store), scanNow: make(chan struct{}, 1), tv: &TVManager{store: store}}
 	app.scanner = &NetworkScanner{store: store, notify: app.notify}
 
 	cert, key := resolvePath(cfg.Server.Cert), resolvePath(cfg.Server.Key)
