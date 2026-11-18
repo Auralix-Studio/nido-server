@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -242,85 +243,195 @@ func wakeOnLAN(mac string) error {
 
 // ---------- gestor ----------
 
+// Tipos de TV según el protocolo que expone en la red.
+const (
+	tvKindLG      = "lg"        // LG webOS: SSAP en 3001/3000, compatible
+	tvKindAndroid = "androidtv" // Android TV / Google TV: 6466/6467, aún no
+	tvKindUnknown = "unknown"
+)
+
+type tvTarget struct {
+	MAC    string `json:"mac"`
+	IP     string `json:"ip"`
+	Name   string `json:"name"`
+	Kind   string `json:"kind"`
+	Paired bool   `json:"paired"`
+}
+
 type TVManager struct {
 	mu    sync.Mutex // la TV atiende mejor una conexión a la vez
 	store *Store
 }
 
-// target devuelve IP y MAC de la TV: de la configuración o, si no, del
-// dispositivo de la red cuyo nombre la delata como LG webOS.
-func (m *TVManager) target() (host, mac string) {
-	host, mac = cfg.TV.Host, normalizeMAC(cfg.TV.MAC)
-	if host != "" && mac != "" {
-		return host, mac
+func portOpen(host string, port int) bool {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, fmt.Sprint(port)), 1200*time.Millisecond)
+	if err != nil {
+		return false
 	}
-	for _, d := range m.store.devices() {
-		name := strings.ToLower(d.Hostname + " " + d.Name + " " + d.Vendor)
-		if !strings.Contains(name, "webos") && !strings.Contains(name, "lgtv") && d.Tag != "tv" {
+	conn.Close()
+	return true
+}
+
+func probeTVKind(ip string) string {
+	switch {
+	case ip == "":
+		return tvKindUnknown
+	case portOpen(ip, tvPorts.secure) || portOpen(ip, tvPorts.plain):
+		return tvKindLG
+	case portOpen(ip, 6466):
+		return tvKindAndroid
+	}
+	return tvKindUnknown
+}
+
+func tvKey(mac string) string {
+	if key := secrets.TVClientKeys[mac]; key != "" {
+		return key
+	}
+	return secrets.TVClientKey // emparejamiento de la versión anterior
+}
+
+// list devuelve las TVs de la red: la de config, las etiquetadas "tv" y las
+// que se delatan por el nombre. El tipo se averigua por los puertos abiertos.
+func (m *TVManager) list() []tvTarget {
+	var targets []tvTarget
+	seen := map[string]bool{}
+	add := func(mac, ip, name string) {
+		if mac == "" || seen[mac] {
+			return
+		}
+		seen[mac] = true
+		targets = append(targets, tvTarget{MAC: mac, IP: ip, Name: name})
+	}
+	if cfg.TV.Host != "" {
+		add(normalizeMAC(cfg.TV.MAC), cfg.TV.Host, "TV")
+	}
+	devices := m.store.devices()
+	sort.Slice(devices, func(i, j int) bool { return devices[i].LastSeen > devices[j].LastSeen })
+	for _, d := range devices {
+		lower := strings.ToLower(d.Hostname + " " + d.Name + " " + d.Vendor)
+		isTV := d.Tag == "tv" || strings.Contains(lower, "webos") || strings.Contains(lower, "lgtv") ||
+			strings.Contains(lower, "bravia") || strings.Contains(lower, "androidtv") || strings.Contains(lower, "chromecast")
+		if !isTV || d.IP == "" {
 			continue
 		}
-		if host == "" {
-			host = d.IP
+		name := d.Name
+		if name == "" {
+			name = d.Hostname
 		}
-		if mac == "" {
-			mac = d.MAC
-		}
-		break
+		add(d.MAC, d.IP, name)
 	}
-	return host, mac
+	var wg sync.WaitGroup
+	for i := range targets {
+		wg.Add(1)
+		go func(t *tvTarget) {
+			defer wg.Done()
+			t.Kind = probeTVKind(t.IP)
+			t.Paired = tvKey(t.MAC) != ""
+		}(&targets[i])
+	}
+	wg.Wait()
+	return targets
+}
+
+// pick elige la TV pedida por MAC o, sin MAC, la primera LG que responda.
+func (m *TVManager) pick(mac string) (tvTarget, error) {
+	targets := m.list()
+	if len(targets) == 0 {
+		return tvTarget{}, errors.New("no se encontró ninguna TV en la red (ponle la etiqueta tv en la pestaña network)")
+	}
+	mac = normalizeMAC(mac)
+	for _, t := range targets {
+		if (mac != "" && t.MAC == mac) || (mac == "" && t.Kind == tvKindLG) {
+			return t, nil
+		}
+	}
+	if mac != "" {
+		return tvTarget{}, errors.New("esa TV ya no está en la red")
+	}
+	return targets[0], nil
+}
+
+func requireLG(t tvTarget) error {
+	switch t.Kind {
+	case tvKindLG:
+		return nil
+	case tvKindAndroid:
+		return errors.New("es un Android TV / Google TV: todavía no compatible (solo LG webOS)")
+	}
+	return errTVOffline
 }
 
 // session conecta, se identifica con la clave guardada y ejecuta op.
-func (m *TVManager) session(op func(*tvClient) error) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	host, _ := m.target()
-	if host == "" {
-		return errors.New("no se encontró ninguna TV LG en la red (ponle la etiqueta tv en la pestaña red)")
+func (m *TVManager) session(mac string, op func(*tvClient) error) error {
+	target, err := m.pick(mac)
+	if err != nil {
+		return err
 	}
-	if secrets.TVClientKey == "" {
+	if err := requireLG(target); err != nil {
+		return err
+	}
+	key := tvKey(target.MAC)
+	if key == "" {
 		return errTVNotPaired
 	}
-	client, err := dialTV(host)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	client, err := dialTV(target.IP)
 	if err != nil {
 		return err
 	}
 	defer client.close()
-	if _, err := client.register(secrets.TVClientKey, 0); err != nil {
+	if _, err := client.register(key, 0); err != nil {
 		return err
 	}
 	return op(client)
 }
 
-// pair pide permiso en la pantalla de la TV y guarda la clave.
-func (m *TVManager) pair() error {
+// pair pide permiso en la pantalla de la TV y guarda su clave.
+func (m *TVManager) pair(mac string) error {
+	target, err := m.pick(mac)
+	if err != nil {
+		return err
+	}
+	if err := requireLG(target); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	host, _ := m.target()
-	if host == "" {
-		return errors.New("no se encontró ninguna TV LG en la red")
-	}
-	client, err := dialTV(host)
+	client, err := dialTV(target.IP)
 	if err != nil {
 		return err
 	}
 	defer client.close()
-	key, err := client.register(secrets.TVClientKey, 60*time.Second)
+	key, err := client.register(tvKey(target.MAC), 60*time.Second)
 	if err != nil {
 		return err
 	}
-	secrets.TVClientKey = key
+	if secrets.TVClientKeys == nil {
+		secrets.TVClientKeys = map[string]string{}
+	}
+	secrets.TVClientKeys[target.MAC] = key
 	return saveSecrets()
 }
 
-func (m *TVManager) status() M {
-	host, mac := m.target()
-	status := M{"host": host, "mac": mac, "paired": secrets.TVClientKey != "", "online": false}
-	if host == "" {
+func (m *TVManager) status(mac string) M {
+	target, err := m.pick(mac)
+	if err != nil {
+		return M{"online": false, "paired": false, "error": err.Error()}
+	}
+	status := M{"host": target.IP, "mac": target.MAC, "name": target.Name, "kind": target.Kind,
+		"paired": target.Paired, "online": target.Kind != tvKindUnknown}
+	if target.Kind != tvKindLG {
+		if target.Kind == tvKindAndroid {
+			status["error"] = requireLG(target).Error()
+		}
 		return status
 	}
-	err := m.session(func(c *tvClient) error {
-		status["online"] = true
+	if !target.Paired {
+		return status
+	}
+	err = m.session(target.MAC, func(c *tvClient) error {
 		if r, err := c.call("ssap://audio/getVolume", nil); err == nil {
 			status["volume"] = r["volume"]
 			status["muted"] = r["muted"]
@@ -333,15 +444,15 @@ func (m *TVManager) status() M {
 		}
 		return nil
 	})
-	if err != nil && !errors.Is(err, errTVOffline) {
+	if err != nil {
 		status["error"] = err.Error()
 	}
 	return status
 }
 
-func (m *TVManager) apps() ([]M, error) {
+func (m *TVManager) apps(mac string) ([]M, error) {
 	var apps []M
-	err := m.session(func(c *tvClient) error {
+	err := m.session(mac, func(c *tvClient) error {
 		r, err := c.call("ssap://com.webos.applicationManager/listLaunchPoints", nil)
 		if err != nil {
 			return err
@@ -363,13 +474,13 @@ var tvButtons = map[string]bool{
 }
 
 // command ejecuta una orden del mando. value depende de la acción.
-func (m *TVManager) command(action, value string) error {
+func (m *TVManager) command(mac, action, value string) error {
 	if action == "power_on" {
-		_, mac := m.target()
-		if mac == "" {
-			return errors.New("no se conoce la MAC de la TV para encenderla")
+		target, err := m.pick(mac)
+		if err != nil {
+			return err
 		}
-		return wakeOnLAN(mac)
+		return wakeOnLAN(target.MAC)
 	}
 	calls := map[string]string{
 		"power_off":    "ssap://system/turnOff",
@@ -383,7 +494,7 @@ func (m *TVManager) command(action, value string) error {
 		"rewind":       "ssap://media.controls/rewind",
 		"forward":      "ssap://media.controls/fastForward",
 	}
-	return m.session(func(c *tvClient) error {
+	return m.session(mac, func(c *tvClient) error {
 		if uri, ok := calls[action]; ok {
 			_, err := c.call(uri, nil)
 			return err

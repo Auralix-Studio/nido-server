@@ -77,10 +77,11 @@ type Config struct {
 }
 
 type Secrets struct {
-	PinHash        string `yaml:"pin_hash,omitempty"`
-	JWTSecret      string `yaml:"jwt_secret,omitempty"`
-	RouterPassword string `yaml:"router_password,omitempty"`
-	TVClientKey    string `yaml:"tv_client_key,omitempty"`
+	PinHash        string            `yaml:"pin_hash,omitempty"`
+	JWTSecret      string            `yaml:"jwt_secret,omitempty"`
+	RouterPassword string            `yaml:"router_password,omitempty"`
+	TVClientKey    string            `yaml:"tv_client_key,omitempty"`  // versión anterior
+	TVClientKeys   map[string]string `yaml:"tv_client_keys,omitempty"` // MAC -> clave
 }
 
 var (

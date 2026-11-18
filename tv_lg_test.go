@@ -128,11 +128,11 @@ func newFakeTV(t *testing.T) (*fakeTV, *TVManager) {
 	t.Cleanup(fake.server.Close)
 	host, port, _ := net.SplitHostPort(strings.TrimPrefix(fake.server.URL, "http://"))
 	plain, _ := strconv.Atoi(port)
-	oldPorts, oldTV, oldKey := tvPorts, cfg.TV, secrets.TVClientKey
-	t.Cleanup(func() { tvPorts, cfg.TV, secrets.TVClientKey = oldPorts, oldTV, oldKey })
+	oldPorts, oldTV, oldKey, oldKeys := tvPorts, cfg.TV, secrets.TVClientKey, secrets.TVClientKeys
+	t.Cleanup(func() { tvPorts, cfg.TV, secrets.TVClientKey, secrets.TVClientKeys = oldPorts, oldTV, oldKey, oldKeys })
 	tvPorts.secure, tvPorts.plain = 1, plain // el seguro falla y usa el normal
 	cfg.TV.Host, cfg.TV.MAC = host, "02:aa:bb:cc:dd:ee"
-	secrets.TVClientKey = ""
+	secrets.TVClientKey, secrets.TVClientKeys = "", nil
 	configPath = filepath.Join(t.TempDir(), "config.yaml")
 	return fake, &TVManager{store: openStore(filepath.Join(t.TempDir(), "state.json"))}
 }
@@ -140,21 +140,21 @@ func newFakeTV(t *testing.T) (*fakeTV, *TVManager) {
 func TestTVPairAndControl(t *testing.T) {
 	fake, tv := newFakeTV(t)
 
-	if err := tv.command("volume_up", ""); !errors.Is(err, errTVNotPaired) {
+	if err := tv.command("", "volume_up", ""); !errors.Is(err, errTVNotPaired) {
 		t.Fatalf("sin emparejar debería pedir pair(): %v", err)
 	}
-	if err := tv.pair(); err != nil {
+	if err := tv.pair(""); err != nil {
 		t.Fatal(err)
 	}
-	if secrets.TVClientKey != "clave-de-la-tv" {
-		t.Fatalf("clave guardada = %q", secrets.TVClientKey)
+	if secrets.TVClientKeys["02:aa:bb:cc:dd:ee"] != "clave-de-la-tv" {
+		t.Fatalf("clave guardada = %v", secrets.TVClientKeys)
 	}
 
 	for _, step := range []struct{ action, value string }{
 		{"volume_set", "25"}, {"volume_up", ""}, {"mute", "true"},
 		{"launch", "youtube.leanback.v4"}, {"button", "enter"}, {"power_off", ""},
 	} {
-		if err := tv.command(step.action, step.value); err != nil {
+		if err := tv.command("", step.action, step.value); err != nil {
 			t.Fatalf("%s: %v", step.action, err)
 		}
 	}
@@ -171,14 +171,14 @@ func TestTVPairAndControl(t *testing.T) {
 
 func TestTVStatusAndApps(t *testing.T) {
 	_, tv := newFakeTV(t)
-	if err := tv.pair(); err != nil {
+	if err := tv.pair(""); err != nil {
 		t.Fatal(err)
 	}
-	status := tv.status()
+	status := tv.status("")
 	if status["online"] != true || status["paired"] != true || status["volume"] != float64(10) {
 		t.Errorf("estado = %v", status)
 	}
-	apps, err := tv.apps()
+	apps, err := tv.apps("")
 	if err != nil || len(apps) != 2 || apps[0]["title"] != "YouTube" {
 		t.Errorf("apps = %v, %v", apps, err)
 	}
@@ -186,11 +186,11 @@ func TestTVStatusAndApps(t *testing.T) {
 
 func TestTVRejectsBadInput(t *testing.T) {
 	_, tv := newFakeTV(t)
-	tv.pair()
+	tv.pair("")
 	for _, step := range []struct{ action, value string }{
 		{"volume_set", "500"}, {"button", "rm -rf"}, {"launch", ""}, {"hack", ""},
 	} {
-		if err := tv.command(step.action, step.value); err == nil {
+		if err := tv.command("", step.action, step.value); err == nil {
 			t.Errorf("%s %q debería rechazarse", step.action, step.value)
 		}
 	}
@@ -200,7 +200,7 @@ func TestTVOffline(t *testing.T) {
 	_, tv := newFakeTV(t)
 	secrets.TVClientKey = "x"
 	tvPorts.secure, tvPorts.plain = 1, 2 // nada escuchando
-	if status := tv.status(); status["online"] != false || status["error"] != nil {
+	if status := tv.status(""); status["online"] != false || status["error"] != nil {
 		t.Errorf("TV apagada: %v", status)
 	}
 }

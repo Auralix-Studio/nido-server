@@ -212,11 +212,17 @@ func (a *App) routes() http.Handler {
 	}))
 
 	// TV
+	mux.HandleFunc("GET /tv/list", auth(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, M{"tvs": a.tv.list()})
+	}))
 	mux.HandleFunc("GET /tv/status", auth(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, a.tv.status())
+		writeJSON(w, 200, a.tv.status(r.URL.Query().Get("mac")))
 	}))
 	mux.HandleFunc("POST /tv/pair", auth(func(w http.ResponseWriter, r *http.Request) {
-		if err := a.tv.pair(); err != nil {
+		var body struct{ MAC string }
+		r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+		json.NewDecoder(r.Body).Decode(&body) // cuerpo opcional
+		if err := a.tv.pair(body.MAC); err != nil {
 			fail(w, http.StatusBadGateway, err.Error())
 			return
 		}
@@ -224,7 +230,7 @@ func (a *App) routes() http.Handler {
 		writeJSON(w, 200, ok)
 	}))
 	mux.HandleFunc("GET /tv/apps", auth(func(w http.ResponseWriter, r *http.Request) {
-		apps, err := a.tv.apps()
+		apps, err := a.tv.apps(r.URL.Query().Get("mac"))
 		if err != nil {
 			fail(w, http.StatusBadGateway, err.Error())
 			return
@@ -232,11 +238,11 @@ func (a *App) routes() http.Handler {
 		writeJSON(w, 200, M{"apps": apps})
 	}))
 	mux.HandleFunc("POST /tv/command", auth(func(w http.ResponseWriter, r *http.Request) {
-		var body struct{ Action, Value string }
+		var body struct{ MAC, Action, Value string }
 		if !readBody(w, r, &body) {
 			return
 		}
-		if err := a.tv.command(body.Action, body.Value); err != nil {
+		if err := a.tv.command(body.MAC, body.Action, body.Value); err != nil {
 			fail(w, http.StatusBadGateway, err.Error())
 			return
 		}
