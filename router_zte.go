@@ -11,10 +11,13 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"html"
 	"io"
+	"log"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -54,6 +57,8 @@ type zteClient struct {
 	info     *routerStatus     // estado del router leído en la última consulta
 	pubKey   *rsa.PublicKey    // clave con la que se firman los cambios
 	blocked  []string          // MAC con regla de bloqueo; nil = no se pudo leer
+	force    bool              // expulsar también sesiones de otras personas
+	moved    []string          // bloqueos movidos a otra banda en la última lectura
 }
 
 func newZTEClient(base, username, password string) *zteClient {
@@ -147,6 +152,54 @@ func (z *zteClient) login() error {
 		return errRouterAuth
 	}
 	z.token = reply.SessToken
+	return z.resolvePreempt()
+}
+
+// Con otra sesión de administrador abierta, el router acepta el login pero
+// muestra "Otro usuario está configurando el dispositivo" y responde
+// SessionTimeout a todo hasta que se expulsa a la otra sesión.
+var (
+	rePreemptSession = regexp.MustCompile(`name="preempt_sessid" value="?([0-9a-fA-F]+)"?[^>]*/?>\s*<label[^>]*>([^<]*)</label>`)
+	errRouterBusy    = errors.New("otra persona está usando el panel del router")
+)
+
+type preemptSession struct{ ID, Owner string }
+
+func (z *zteClient) resolvePreempt() error {
+	page, err := z.request("GET", "", nil)
+	if err != nil || !strings.Contains(string(page), "login_preempt") {
+		return err
+	}
+	var sessions []preemptSession
+	for _, match := range rePreemptSession.FindAllStringSubmatch(string(page), -1) {
+		sessions = append(sessions, preemptSession{ID: match[1], Owner: html.UnescapeString(match[2])})
+	}
+	if len(sessions) == 0 {
+		return errors.New("el router pide expulsar otra sesión pero no se pudo leer cuál")
+	}
+	// Una sesión abierta desde esta misma máquina es nuestra y se quedó
+	// colgada: se expulsa siempre. La de otra persona solo si se pide.
+	self := localIP()
+	for _, s := range sessions {
+		mine := self != "" && strings.HasPrefix(s.Owner, self+"(")
+		if !mine && !z.force {
+			return fmt.Errorf("%w (%s)", errRouterBusy, s.Owner)
+		}
+	}
+	raw, err := z.request("POST", "?_type=loginData&_tag=login_preempt", url.Values{
+		"preempt_sessid": {sessions[0].ID}, "action": {"preempt"},
+	})
+	if err != nil {
+		return err
+	}
+	var reply zteLoginReply
+	if json.Unmarshal(raw, &reply) != nil || !reply.NeedRefresh {
+		return errors.New("el router no aceptó expulsar la otra sesión")
+	}
+	if reply.SessToken != "" {
+		z.token = reply.SessToken
+	}
+	log.Printf("Router: expulsada la sesión de %s", sessions[0].Owner)
 	return nil
 }
 
@@ -307,21 +360,42 @@ func (z *zteClient) status() *routerStatus {
 	return status
 }
 
+// activeBlocks devuelve las MAC con regla en una red con el filtro activo:
+// una regla con el filtro desactivado no bloquea nada. nil = no se pudo leer.
+func (z *zteClient) activeBlocks() []string {
+	z.request("GET", zteViewAdvanced, nil)
+	policies, err := z.instances("acl_policy", zteACLPolicy)
+	if err != nil {
+		return nil
+	}
+	rules, err := z.aclRules()
+	if err != nil {
+		return nil
+	}
+	policy := map[string]string{}
+	for _, values := range policies {
+		policy[values["_InstID"]] = values["ACLPolicy"]
+	}
+	blocked := []string{}
+	for _, rule := range rules {
+		if policy[rule.Interface] == "Ban" {
+			blocked = append(blocked, rule.MAC)
+		}
+	}
+	return blocked
+}
+
 // devices inicia sesión, lee los equipos conectados (WiFi y cable) y sale.
 func (z *zteClient) devices() ([]routerDevice, error) {
 	if err := z.login(); err != nil {
 		return nil, err
 	}
 	defer z.logout()
+	var wifiSeen []routerDevice
 	defer func() { // antes de cerrar sesión
 		z.info = z.status()
-		z.request("GET", zteViewAdvanced, nil)
-		if rules, err := z.aclRules(); err == nil {
-			z.blocked = []string{}
-			for _, rule := range rules {
-				z.blocked = append(z.blocked, rule.MAC)
-			}
-		}
+		z.moved = z.enforceBlocks(wifiSeen)
+		z.blocked = z.activeBlocks()
 	}()
 
 	// Página "Estado de la red local": trae señal, red WiFi y puerto LAN.
@@ -329,6 +403,7 @@ func (z *zteClient) devices() ([]routerDevice, error) {
 	z.request("GET", "?_type=menuView&_tag=localNetStatus&Menu3Location=0", nil)
 	detailWifi, errWifi := z.fetch("wlan_clients", "?_type=menuData&_tag=wlan_client_stat_lua.lua", "wifi")
 	detailEth, errEth := z.fetch("lan_devices", "?_type=menuData&_tag=accessdev_landevs_lua.lua", "eth")
+	wifiSeen = detailWifi
 	if errWifi == nil && errEth == nil && len(detailWifi)+len(detailEth) > 0 {
 		return append(detailWifi, detailEth...), nil
 	}

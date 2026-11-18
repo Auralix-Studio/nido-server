@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -279,80 +280,221 @@ func (z *zteClient) savePolicies(policies []map[string]string, change map[string
 	return z.post(zteACLPolicy, data)
 }
 
-// setBlocked bloquea o desbloquea una MAC en todas las redes WiFi activas.
-func (z *zteClient) setBlocked(mac string, block bool) error {
-	mac = normalizeMAC(mac)
-	if mac == "" {
-		return errors.New("MAC inválida")
-	}
-	if err := z.login(); err != nil {
-		return err
-	}
-	defer z.logout()
+// El router admite una sola regla por MAC y cada regla actúa solo en la red
+// (banda) que indica. Por eso la regla se pone en la red donde está el equipo
+// y, si aparece conectado en otra, enforceBlocks la mueve allí.
 
-	var ssids []string
-	if block {
-		var err error
-		if ssids, err = z.activeSSIDs(); err != nil {
-			return err
-		}
-	}
-	z.request("GET", zteViewAdvanced, nil)
-	rules, err := z.aclRules()
+// ssidAPs devuelve nombre de red -> punto de acceso de las redes activas.
+func (z *zteClient) ssidAPs() (map[string]string, error) {
+	z.request("GET", zteViewBasic, nil)
+	instances, err := z.instances("ssids", zteSSIDConf)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	if !block {
-		for _, rule := range rules {
-			if rule.MAC != mac {
-				continue
-			}
-			if err := z.post(zteACLRules, "IF_ACTION=Delete&_InstID="+escape(rule.ID)); err != nil {
-				return err
-			}
+	aps := map[string]string{}
+	for _, values := range instances {
+		if strings.Contains(values["_InstID"], ".AP") && values["ESSID"] != "" && values["Enable"] == "1" {
+			aps[values["ESSID"]] = values["_InstID"]
 		}
-		return nil
 	}
+	if len(aps) == 0 {
+		return nil, errors.New("el router no tiene redes WiFi activas")
+	}
+	return aps, nil
+}
 
+// placeRule deja una única regla para la MAC, en el punto de acceso indicado.
+func (z *zteClient) placeRule(mac, ap string, rules []aclRule) error {
+	for _, rule := range rules {
+		if rule.MAC != mac {
+			continue
+		}
+		if rule.Interface == ap {
+			return nil
+		}
+		if err := z.post(zteACLRules, "IF_ACTION=Delete&_InstID="+escape(rule.ID)); err != nil {
+			return fmt.Errorf("mover regla: %w", err)
+		}
+	}
+	name := "nido_" + strings.ReplaceAll(mac, ":", "")[6:]
+	data := "IF_ACTION=Apply&_InstID=-1&MACAddress=" + escape(mac) + "&Name=" + escape(name) + "&Interface=" + escape(ap)
+	if err := z.post(zteACLRules, data); err != nil {
+		return fmt.Errorf("crear regla: %w", err)
+	}
+	return nil
+}
+
+// ensureBan pone en lista negra todas las redes activas. Sin reglas para
+// otros equipos, la lista negra no afecta a nadie más.
+func (z *zteClient) ensureBan(aps map[string]string) error {
+	z.request("GET", zteViewAdvanced, nil)
 	policies, err := z.instances("acl_policy", zteACLPolicy)
 	if err != nil {
 		return err
 	}
-	policy := map[string]string{}
-	for _, values := range policies {
-		policy[values["_InstID"]] = values["ACLPolicy"]
-	}
-	for _, ssid := range ssids {
-		if policy[ssid] == "Allow" {
-			return errors.New("el router usa el filtro MAC en modo lista blanca; no lo modifico")
-		}
-	}
-
-	name := "nido_" + strings.ReplaceAll(mac, ":", "")[6:]
-	for _, ssid := range ssids {
-		exists := false
-		for _, rule := range rules {
-			exists = exists || (rule.MAC == mac && rule.Interface == ssid)
-		}
-		if exists {
-			continue
-		}
-		data := "IF_ACTION=Apply&_InstID=-1&MACAddress=" + escape(mac) +
-			"&Name=" + escape(name) + "&Interface=" + escape(ssid)
-		if err := z.post(zteACLRules, data); err != nil {
-			return err
-		}
-	}
-	// Las reglas solo actúan con la red en modo lista negra
 	change := map[string]string{}
-	for _, ssid := range ssids {
-		if policy[ssid] != "Ban" {
-			change[ssid] = "Ban"
+	for _, values := range policies {
+		for _, ap := range aps {
+			if values["_InstID"] != ap {
+				continue
+			}
+			switch values["ACLPolicy"] {
+			case "Allow":
+				return errors.New("el router usa el filtro MAC en modo lista blanca; no lo modifico")
+			case "Ban":
+			default:
+				change[ap] = "Ban"
+			}
 		}
 	}
 	if len(change) == 0 {
 		return nil
 	}
-	return z.savePolicies(policies, change)
+	if err := z.savePolicies(policies, change); err != nil {
+		return fmt.Errorf("activar filtro: %w", err)
+	}
+	return nil
+}
+
+// isSessionError indica que el router cortó la sesión a mitad de operación.
+func isSessionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := err.Error()
+	return strings.Contains(text, "SessionTimeout") || strings.Contains(text, "caducado")
+}
+
+// withSession inicia sesión, ejecuta la operación y, si el router corta la
+// sesión a mitad (otro login, caducidad), vuelve a entrar y la repite una vez.
+func (z *zteClient) withSession(op func() error) error {
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		if err = z.login(); err != nil {
+			return err
+		}
+		err = op()
+		z.logout()
+		if !isSessionError(err) {
+			return err
+		}
+		log.Printf("Router: sesión cortada (%v), reintentando", err)
+		z.pubKey = nil
+	}
+	return err
+}
+
+// setBlocked bloquea o desbloquea una MAC. connectedSSID es la red en la que
+// está ahora el equipo ("" si no se sabe).
+func (z *zteClient) setBlocked(mac string, block bool, connectedSSID string) error {
+	mac = normalizeMAC(mac)
+	if mac == "" {
+		return errors.New("MAC inválida")
+	}
+	return z.withSession(func() error {
+		var aps map[string]string
+		if block {
+			var err error
+			if aps, err = z.ssidAPs(); err != nil {
+				return err
+			}
+		}
+		z.request("GET", zteViewAdvanced, nil)
+		rules, err := z.aclRules()
+		if err != nil {
+			return err
+		}
+		if !block {
+			for _, rule := range rules {
+				if rule.MAC == mac {
+					if err := z.post(zteACLRules, "IF_ACTION=Delete&_InstID="+escape(rule.ID)); err != nil {
+						return err
+					}
+				}
+			}
+			return nil
+		}
+
+		// No tocar nada si el dueño usa el filtro como lista blanca
+		policies, err := z.instances("acl_policy", zteACLPolicy)
+		if err != nil {
+			return err
+		}
+		for _, values := range policies {
+			for _, active := range aps {
+				if values["_InstID"] == active && values["ACLPolicy"] == "Allow" {
+					return errors.New("el router usa el filtro MAC en modo lista blanca; no lo modifico")
+				}
+			}
+		}
+
+		ap := aps[connectedSSID]
+		if ap == "" {
+			ap = firstAP(aps)
+		}
+		if err := z.placeRule(mac, ap, rules); err != nil {
+			return err
+		}
+		if err := z.ensureBan(aps); err != nil {
+			// Sin filtro activo la regla no hace nada: deshacerla para no
+			// dejar un "bloqueado" que en realidad no bloquea.
+			z.request("GET", zteViewAdvanced, nil)
+			if current, readErr := z.aclRules(); readErr == nil {
+				for _, rule := range current {
+					if rule.MAC == mac {
+						z.post(zteACLRules, "IF_ACTION=Delete&_InstID="+escape(rule.ID))
+					}
+				}
+			}
+			return err
+		}
+		return nil
+	})
+}
+
+func firstAP(aps map[string]string) string {
+	best := ""
+	for _, ap := range aps {
+		if best == "" || ap < best {
+			best = ap
+		}
+	}
+	return best
+}
+
+// enforceBlocks mueve la regla de un equipo bloqueado que se ha conectado por
+// otra banda. Se llama con la sesión ya iniciada. Devuelve los equipos movidos.
+func (z *zteClient) enforceBlocks(connected []routerDevice) []string {
+	aps, err := z.ssidAPs()
+	if err != nil {
+		return nil
+	}
+	z.request("GET", zteViewAdvanced, nil)
+	rules, err := z.aclRules()
+	if err != nil {
+		return nil
+	}
+	ruleAP := map[string]string{}
+	for _, rule := range rules {
+		ruleAP[rule.MAC] = rule.Interface
+	}
+	var moved []string
+	for _, d := range connected {
+		current, blocked := ruleAP[d.MAC]
+		ap := aps[d.SSID]
+		if !blocked || d.Conn != "wifi" || ap == "" || ap == current {
+			continue
+		}
+		if err := z.placeRule(d.MAC, ap, rules); err != nil {
+			log.Printf("Router: no se pudo mover el bloqueo de %s: %v", d.MAC, err)
+			continue
+		}
+		moved = append(moved, d.MAC)
+	}
+	if len(moved) > 0 {
+		if err := z.ensureBan(aps); err != nil {
+			log.Printf("Router: %v", err)
+		}
+	}
+	return moved
 }

@@ -57,6 +57,12 @@ func (f *fakeACLRouter) handle(w http.ResponseWriter, r *http.Request) {
 		case tag == "wlan_macfilterrule_lua.lua" && form.Get("IF_ACTION") == "Delete":
 			delete(f.rules, form.Get("_InstID"))
 		case tag == "wlan_macfilterrule_lua.lua":
+			for _, rule := range f.rules { // como el F6600P: una regla por MAC
+				if rule[0] == form.Get("MACAddress") {
+					fmt.Fprint(w, "<ajax_response_xml_root><IF_ERRORID>-258</IF_ERRORID><IF_ERRORSTR>FAIL</IF_ERRORSTR></ajax_response_xml_root>")
+					return
+				}
+			}
 			f.nextRule++
 			f.rules[fmt.Sprintf("DEV.ACL%d", f.nextRule)] = [2]string{form.Get("MACAddress"), form.Get("Interface")}
 		case tag == "wlan_macfilteraclpolicy_lua.lua":
@@ -123,48 +129,88 @@ func TestZTEBlockAndUnblock(t *testing.T) {
 	fake, client := newFakeACLRouter(t)
 	const mac = "02:aa:bb:11:22:33"
 
-	if err := client.setBlocked(mac, true); err != nil {
+	// Conectado a la red 5G (AP3): una sola regla, en esa red
+	if err := client.setBlocked(mac, true, "CASA 5G"); err != nil {
 		t.Fatal(err)
 	}
-	// Una regla por red activa (AP1 y AP3), y solo esas redes pasan a lista negra
-	interfaces := map[string]bool{}
+	if len(fake.rules) != 1 {
+		t.Fatalf("reglas = %v", fake.rules)
+	}
 	for _, rule := range fake.rules {
-		if rule[0] != mac {
-			t.Errorf("regla con MAC inesperada: %v", rule)
+		if rule != [2]string{mac, "DEV.WIFI.AP3"} {
+			t.Errorf("regla = %v", rule)
 		}
-		interfaces[rule[1]] = true
 	}
-	if len(fake.rules) != 2 || !interfaces["DEV.WIFI.AP1"] || !interfaces["DEV.WIFI.AP3"] {
-		t.Errorf("reglas = %v", fake.rules)
-	}
+	// Todas las redes activas en lista negra; la desactivada (AP2) intacta
 	if got := strings.Join(fake.policy, ","); got != "Ban,Disabled,Ban,Disabled" {
 		t.Errorf("políticas = %s", got)
 	}
 
-	// Bloquear dos veces no duplica reglas ni vuelve a tocar la política
+	// Repetir el bloqueo no envía cambios
 	posts := len(fake.posts)
-	if err := client.setBlocked(mac, true); err != nil {
+	if err := client.setBlocked(mac, true, "CASA 5G"); err != nil {
 		t.Fatal(err)
 	}
 	if len(fake.posts) != posts {
 		t.Errorf("el segundo bloqueo envió cambios: %v", fake.posts[posts:])
 	}
 
-	if macs, err := client.blockedMACs(); err != nil || len(macs) != 1 || macs[0] != mac {
-		t.Errorf("bloqueados = %v, %v", macs, err)
-	}
-	if err := client.setBlocked(mac, false); err != nil {
+	// Sin red conocida: la primera red activa
+	other := "02:aa:bb:44:55:66"
+	if err := client.setBlocked(other, true, ""); err != nil {
 		t.Fatal(err)
 	}
-	if len(fake.rules) != 0 {
-		t.Errorf("quedaron reglas tras desbloquear: %v", fake.rules)
+
+	if err := client.setBlocked(mac, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range fake.rules {
+		if rule[0] == mac {
+			t.Errorf("quedó la regla tras desbloquear: %v", rule)
+		}
+	}
+}
+
+func TestZTEEnforceFollowsBand(t *testing.T) {
+	fake, client := newFakeACLRouter(t)
+	const mac = "02:aa:bb:11:22:33"
+	if err := client.setBlocked(mac, true, "CASA 2.4G"); err != nil {
+		t.Fatal(err)
+	}
+	// El equipo aparece ahora en la red 5G: la regla debe moverse allí
+	if err := client.login(); err != nil {
+		t.Fatal(err)
+	}
+	moved := client.enforceBlocks([]routerDevice{{MAC: mac, Conn: "wifi", SSID: "CASA 5G"}})
+	if len(moved) != 1 || len(fake.rules) != 1 {
+		t.Fatalf("movidos = %v, reglas = %v", moved, fake.rules)
+	}
+	for _, rule := range fake.rules {
+		if rule[1] != "DEV.WIFI.AP3" {
+			t.Errorf("la regla sigue en %s", rule[1])
+		}
+	}
+	if blocked := client.activeBlocks(); len(blocked) != 1 || blocked[0] != mac {
+		t.Errorf("bloqueados activos = %v", blocked)
+	}
+}
+
+func TestZTEBlockedNeedsPolicy(t *testing.T) {
+	fake, client := newFakeACLRouter(t)
+	// Regla sin filtro activo (lo que pasaba antes): no cuenta como bloqueado
+	fake.rules["DEV.ACL9"] = [2]string{"02:aa:bb:11:22:33", "DEV.WIFI.AP1"}
+	if err := client.login(); err != nil {
+		t.Fatal(err)
+	}
+	if blocked := client.activeBlocks(); len(blocked) != 0 {
+		t.Errorf("una regla con el filtro desactivado no bloquea: %v", blocked)
 	}
 }
 
 func TestZTEBlockRespectsWhitelist(t *testing.T) {
 	fake, client := newFakeACLRouter(t)
 	fake.policy[0] = "Allow" // el dueño usa lista blanca en la red principal
-	if err := client.setBlocked("02:aa:bb:11:22:33", true); err == nil {
+	if err := client.setBlocked("02:aa:bb:11:22:33", true, ""); err == nil {
 		t.Fatal("debería negarse a tocar un filtro en modo lista blanca")
 	}
 	if len(fake.posts) != 0 {

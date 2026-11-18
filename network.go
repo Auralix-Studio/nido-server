@@ -305,6 +305,11 @@ func (n *NetworkScanner) fromRouter(info *netInfo) ([]seenDevice, error) {
 	}
 	client := newZTEClient(routerURL(info), cfg.Router.Username, secrets.RouterPassword)
 	devices, err := client.devices()
+	if isSessionError(err) {
+		// Sesión cortada a mitad (otro login): reconectar una vez
+		client = newZTEClient(routerURL(info), cfg.Router.Username, secrets.RouterPassword)
+		devices, err = client.devices()
+	}
 	if err != nil {
 		if errors.Is(err, errRouterAuth) {
 			// Insistir con una contraseña mala bloquea el panel del router.
@@ -320,6 +325,9 @@ func (n *NetworkScanner) fromRouter(info *netInfo) ([]seenDevice, error) {
 	if client.blocked != nil {
 		n.store.syncBlocked(client.blocked)
 	}
+	for _, mac := range client.moved {
+		n.notify("block", "Equipo bloqueado intentó entrar por otra banda: "+mac+" (bloqueo movido)", mac, true)
+	}
 	found := make([]seenDevice, 0, len(devices))
 	seen := map[string]bool{}
 	for _, d := range devices {
@@ -334,6 +342,7 @@ func (n *NetworkScanner) fromRouter(info *netInfo) ([]seenDevice, error) {
 }
 
 // setBlocked bloquea o desbloquea un dispositivo en el filtro MAC del router.
+// Es una orden del usuario: si otra persona tiene el panel abierto, se la expulsa.
 func (n *NetworkScanner) setBlocked(mac string, block bool) error {
 	if !n.routerEnabled() {
 		return errors.New("Bloquear requiere tener el router configurado")
@@ -344,8 +353,14 @@ func (n *NetworkScanner) setBlocked(mac string, block bool) error {
 	if err != nil {
 		return err
 	}
+	ssid := ""
+	if device, ok := n.store.device(mac); ok {
+		ssid = device.SSID
+	}
 	client := newZTEClient(routerURL(info), cfg.Router.Username, secrets.RouterPassword)
-	if err := client.setBlocked(mac, block); err != nil {
+	client.force = true
+	if err := client.setBlocked(mac, block, ssid); err != nil {
+		log.Printf("Router: fallo al %s %s: %v", map[bool]string{true: "bloquear", false: "desbloquear"}[block], mac, err)
 		return err
 	}
 	n.store.setBlocked(mac, block)
