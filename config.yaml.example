@@ -14,6 +14,7 @@ router:
   type: "zte"                # "zte" para routers ZTE (F6600P y similares), "" para desactivar
   url: ""                    # vacío = http://<puerta de enlace>
   username: admin
+  preempt: true              # cerrar la sesión de quien tenga el panel abierto
 
 services:
   # Servicios systemd fijados (también se pueden fijar desde la app).

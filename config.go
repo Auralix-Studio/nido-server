@@ -57,6 +57,9 @@ type Config struct {
 		Type     string `yaml:"type"`
 		URL      string `yaml:"url"`
 		Username string `yaml:"username"`
+		// Si otra persona tiene el panel abierto, cerrarle la sesión para
+		// poder leer. false = esperar y usar el escaneo ARP mientras tanto.
+		Preempt bool `yaml:"preempt"`
 	} `yaml:"router"`
 	TV struct {
 		// Vacío = detectar la TV LG en la red por su nombre
@@ -134,6 +137,7 @@ func loadConfig() {
 	cfg.Network.OfflineAfterSeconds = 300
 	cfg.Router.Type = "zte"
 	cfg.Router.Username = "admin"
+	cfg.Router.Preempt = true
 	cfg.Alerts.NewDevice = true
 	cfg.Alerts.ServiceDown = true
 	cfg.Storage.Path = "data/state.json"

@@ -304,10 +304,12 @@ func (n *NetworkScanner) fromRouter(info *netInfo) ([]seenDevice, error) {
 		return nil, fmt.Errorf("login del router en pausa %d min tras un rechazo", int(paused.Minutes())+1)
 	}
 	client := newZTEClient(routerURL(info), cfg.Router.Username, secrets.RouterPassword)
+	client.force = cfg.Router.Preempt
 	devices, err := client.devices()
 	if isSessionError(err) {
 		// Sesión cortada a mitad (otro login): reconectar una vez
 		client = newZTEClient(routerURL(info), cfg.Router.Username, secrets.RouterPassword)
+		client.force = cfg.Router.Preempt
 		devices, err = client.devices()
 	}
 	if err != nil {
@@ -466,6 +468,16 @@ type deviceView struct {
 	IsGateway bool `json:"is_gateway"`
 }
 
+// isOnline: con el router como fuente, conectado = estaba en su última lista
+// (es exacto). Con escaneo ARP, que no ve a los móviles en reposo, se da
+// margen: visto en los últimos offline_after_seconds.
+func isOnline(d Device, now, lastScan float64, source string) bool {
+	if source == "router" && lastScan > 0 {
+		return d.LastSeen >= lastScan-5
+	}
+	return now-d.LastSeen < float64(cfg.Network.OfflineAfterSeconds)
+}
+
 func (n *NetworkScanner) snapshot() M {
 	n.mu.Lock()
 	info, lastScan, lastError, source, scanning := n.info, n.lastScan, n.lastError, n.source, n.scanning
@@ -486,7 +498,7 @@ func (n *NetworkScanner) snapshot() M {
 	for _, d := range n.store.devices() {
 		view := deviceView{
 			Device:    d,
-			Online:    now-d.LastSeen < float64(cfg.Network.OfflineAfterSeconds),
+			Online:    isOnline(d, now, lastScan, source),
 			IsSelf:    d.MAC == selfMAC,
 			IsGateway: gatewayIP != "" && d.IP == gatewayIP,
 		}
